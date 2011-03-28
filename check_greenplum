@@ -1,0 +1,528 @@
+#!/usr/bin/perl 
+#############
+# check_greenplum
+#
+# Nagios Plugin to monitor Greenplum
+#
+# TODO:
+# More robust segment offline check with specifications
+#  for X seg to warn X segs to crit
+#
+# CHANGELOG:
+#
+# 1.0.1 2011-02-25 Initial Release
+#
+#
+# 2011-02-25 SHK
+############
+
+use strict;
+use warnings;
+use diagnostics;
+use DBI;
+use Getopt::Long qw(:config no_ignore_case);
+
+use vars qw( $dbh $sth $sql @result %opt
+  $NAME $VERSION $AUTHOR $CONTACT
+  $USAGE $HELP $LICENSE
+);
+
+$NAME    = 'check_greenplum';
+$VERSION = '1.0.1';
+$AUTHOR  = 'Scott Kahler';
+$CONTACT = 'scott.kahler@gmail.com';
+
+my %ERRORS = (
+    'OK'        => 0,
+    'WARNING'   => 1,
+    'CRITICAL'  => 2,
+    'UNKNOWN'   => 3,
+    'DEPENDENT' => 4
+);
+
+### USAGE TEXT
+$USAGE = <<'END_USAGE';
+Usage: $NAME [OPTION]...
+END_USAGE
+
+### HELP TEXT
+$HELP = <<'END_HELP';
+
+A nagios check to go in and check various Greenplum availability pieces
+
+GENERAL OPTIONS:
+
+  -t, --timeout           Plugin timeout in seconds       [default=300]
+  -U, --username          Username to connect with        (mandatory)
+  -P, --password          Password to connect with        (mandatory)
+  -H, --dbhost            Database Hostname to connect to (mandatory)
+  -D, --db                Database to connect to          (mandatory)
+
+                 
+TESTS:
+      Check to see if Greenplum accepts a connection
+      This is the default check
+
+  --do-connect-test
+
+
+
+      Check to see if getting data from a table works
+      The check executes a SELECT count by segment_id query
+      for the specified table. This could also be used to
+      setup SLA checks for getting data from the db
+ 
+  --do-select-test
+  --select-schema         Schema for Select check         (mandatory)
+  --select-table          Table for Select check          (mandatory)
+
+
+       Check to see if table creation works
+       The check creates a temp table with and id(int) and
+       vlas(char) columns and set the distributed by to id.
+       This helps to monitor if the catalog queries and table 
+       creation are happening in a reasonable amount of table 
+                  
+  --do-create-test
+  --create-table          Table for Create check          (mandatory)
+
+
+        Check to see if GP considers any segments offline
+        Query the gp_configuration (3.x) and gp_segment_configuration (4.x)
+        tables to see if any segments are marked down at the master level.
+        Currently this will crit if any show down.
+
+  --do-3x-all-segments-valid 
+  --do-4x-all-segments-valid
+
+END_HELP
+
+# VERSION AND LICENSE
+$LICENSE = <<"END_LICENSE";
+$NAME $VERSION
+Copyright (C) 2008-2011 $AUTHOR
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+
+Written by $AUTHOR <$CONTACT>
+END_LICENSE
+
+### OPTIONS WITH DEFAULT VALUES
+%opt = (
+    'debug'                    => 0,
+    'help'                     => 0,
+    'version'                  => 0,
+    'do_select_test'           => 0,
+    'do_create_test'           => 0,
+    'do_connect_test'          => 0,
+    'do_3x_all_segments_valid' => 0,
+    'do_4x_all_segments_valid' => 0,
+    'db'                       => undef,
+    'dbhost'                   => undef,
+    'timeout'                  => 300,
+    'username'                 => undef,
+    'password'                 => undef,
+    'select_schema'            => undef,
+    'select_table'             => undef,
+    'create_table'             => undef,
+);
+
+### GET OPTIONS
+GetOptions(
+    'd|debug'                     => \$opt{debug},
+    'h|help'                      => \$opt{help},
+    'V|version'                   => \$opt{version},
+    'do-select-test'              => \$opt{do_select_test},
+    'do-create-test'              => \$opt{do_create_test},
+    'do-connect-test'             => \$opt{do_connect_test},
+    'do-3x-all-segments-valid'    => \$opt{do_3x_all_segments_valid},
+    'do-4x-all-segments-valid'    => \$opt{do_4x_all_segments_valid},
+    't|timeout=i'                 => \$opt{timeout},
+    'U|username=s'                => \$opt{username},
+    'P|password=s'                => \$opt{password},
+    'H|dbhost=s'                  => \$opt{dbhost},
+    'D|db=s'                      => \$opt{db},
+    'select-schema=s'             => \$opt{select_schema},
+    'select-table=s'              => \$opt{select_table},
+    'create-table=s'              => \$opt{create_table},
+) or do { print $USAGE; exit $ERRORS{'UNKNOWN'} };
+
+# IF HELP
+if ( $opt{help} ) {
+    do_help();
+}
+
+# IF VERSION
+if ( $opt{version} ) {
+    do_version();
+}
+
+$SIG{ALRM} = sub { die "timeout" };
+
+if ( $opt{do_select_test} ) {
+    do_help()
+      unless ( $opt{db}
+        && $opt{dbhost}
+        && $opt{username}
+        && $opt{password}
+        && $opt{select_schema}
+        && $opt{select_table} );
+    do_gp_select_check();
+}
+elsif ( $opt{do_create_test} ) {
+    do_help()
+      unless ( $opt{db}
+        && $opt{dbhost}
+        && $opt{username}
+        && $opt{password}
+        && $opt{create_table} );
+    do_gp_create_check();
+}
+elsif ( $opt{do_3x_all_segments_valid} ) {
+    do_help()
+      unless ( $opt{db}
+        && $opt{dbhost}
+        && $opt{username}
+        && $opt{password} );
+    do_gp_3x_all_segments_valid();
+}
+elsif ( $opt{do_4x_all_segments_valid} ) {
+    do_help()
+      unless ( $opt{db}
+        && $opt{dbhost}
+        && $opt{username}
+        && $opt{password} );
+    do_gp_4x_all_segments_valid();
+}
+elsif ( $opt{do_connect_test} ) {
+    do_help()
+      unless ( $opt{db}
+        && $opt{dbhost}
+        && $opt{username}
+        && $opt{password} );
+    do_gp_connect_test();
+}
+else {
+    ### BY DEFAULT DO CONNECT TEST IF DB VARIABLES ARE PASSED
+    ### AND NO TEST OPTIONS ARE CALLED
+    do_help()
+      unless ( $opt{db}
+        && $opt{dbhost}
+        && $opt{username}
+        && $opt{password} );
+    do_gp_connect_test();
+}
+
+
+### SHOULD NOT GET TO THIS EXIT
+exit(3);
+
+######################################### SUBS ################################
+
+sub do_help {
+    print $USAGE, $HELP;
+    exit $ERRORS{'OK'};
+}
+
+sub do_version {
+    print $LICENSE;
+    exit $ERRORS{'OK'};
+}
+
+sub do_gp_select_check {
+    my $CHECK_SQL =
+qq~SELECT COUNT(1), gp_segment_id FROM $opt{select_schema}.$opt{select_table} GROUP BY gp_segment_id~;
+
+    my $start_time = time;
+    eval {
+        ### SET THE LENGTH TO TIMEOUT THE QUERY
+        alarm( $opt{timeout} );
+
+        $dbh = DBI->connect(
+            "dbi:Pg:dbname=$opt{db};host=$opt{dbhost};port=5432",
+            $opt{username},
+            $opt{password},
+            { AutoCommit => 0, RaiseError => 1, PrintError => 0 }
+        ) || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+
+        $sth = $dbh->prepare($CHECK_SQL)
+          || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+        $sth->execute
+          || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+        while ( my @row = $sth->fetchrow_array ) {
+            push @result, \@row;
+        }
+        $sth->finish;
+        $dbh->disconnect;
+        alarm(0);
+    };
+
+    if ( $@ && $@ =~ /timeout/ ) {
+        ### ALARM TIMED OUT THE QUERY WHICH MEANS CONNECTED TO THE SERVER BUT
+        ### BUT QUERY IS TAKING TO LONG TO COMPLETE
+        $sth->finish;
+        $dbh->disconnect;
+        print "Greenplum SELECT timeout, gt $opt{timeout} secs\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    elsif ($@) {
+        ### DIDN'T TIMEOUT BUT EVAL FUNCTION CAUGHT AN ERROR SO WE NEED TO CRIT
+        ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
+        ### PLUGIN WANTS TO QUERY
+        alarm(0);
+        my ($error) = $@ =~ /^(.*+)\n/;
+        print "Greenplum Error: $error\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    else {
+        ### EVERYTHING WORKED OKAY YAY
+        my $end_time = time;
+        my $run_time = $end_time - $start_time;
+
+        print "Greenplum SELECT OK - $run_time seconds\n";
+        exit $ERRORS{'OK'};
+    }
+
+### THE ABOVE IF/ELSIF/ELSE SHOULD CATCH EVERYTHING SO WE SHOULDN'T
+### GET TO THIS EXIT
+    exit(3);
+
+}
+
+sub do_gp_create_check {
+
+    my $CREATE_SQL =
+qq~CREATE TEMP TABLE $opt{create_table} ( id int, vals char(16) ) DISTRIBUTED by (id)~;
+
+    my $start_time = time;
+    eval {
+        ### SET THE LENGTH TO TIMEOUT THE QUERY
+        alarm( $opt{timeout} );
+
+        $dbh = DBI->connect(
+            "dbi:Pg:dbname=$opt{db};host=$opt{dbhost};port=5432",
+            $opt{username},
+            $opt{password},
+            { AutoCommit => 0, RaiseError => 1, PrintError => 0 }
+        ) || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+        $dbh->do($CREATE_SQL)
+          || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+        $dbh->disconnect;
+        alarm(0);
+    };
+
+    if ( $@ && $@ =~ /timeout/ ) {
+        ### ALARM TIMED OUT THE QUERY WHICH MEANS CONNECTED TO THE SERVER BUT
+        ### BUT QUERY IS TAKING TO LONG TO COMPLETE
+        $dbh->disconnect;
+        print "Greenplum CREATE timeout, gt $opt{timeout} secs\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    elsif ($@) {
+        ### DIDN'T TIMEOUT BUT EVAL FUNCTION CAUGHT AN ERROR SO WE NEED TO CRIT
+        ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
+        ### PLUGIN WANTS TO QUERY
+        alarm(0);
+        my ($error) = $@ =~ /^(.*+)\n/;
+        print "Greenplum Error: $error\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    else {
+        ### EVERYTHING WORKED OKAY YAY
+        my $end_time = time;
+        my $run_time = $end_time - $start_time;
+
+        print "Greenplum CREATE OK - $run_time seconds\n";
+        exit $ERRORS{'OK'};
+    }
+
+### THE ABOVE IF/ELSIF/ELSE SHOULD CATCH EVERYTHING SO WE SHOULDN'T
+### GET TO THIS EXIT
+    exit(3);
+
+}
+
+
+sub do_gp_3x_all_segments_valid {
+
+    my $SQL =
+qq~SELECT hostname, port, datadir FROM pg_catalog.gp_configuration WHERE valid = 'f'~;
+
+    my $start_time = time;
+
+    eval {
+        ### SET THE LENGTH TO TIMEOUT THE QUERY
+        alarm( $opt{timeout} );
+
+        $dbh = DBI->connect(
+            "dbi:Pg:dbname=$opt{db};host=$opt{dbhost};port=5432",
+            $opt{username},
+            $opt{password},
+            { AutoCommit => 0, RaiseError => 1, PrintError => 0 }
+        ) || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+
+        $sth = $dbh->prepare($SQL)
+          || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+        $sth->execute
+          || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+        while ( my @row = $sth->fetchrow_array ) {
+            push @result, \@row;
+        }
+        $sth->finish;
+        $dbh->disconnect;
+        alarm(0);
+    };
+
+    if ( $@ && $@ =~ /timeout/ ) {
+        ### ALARM TIMED OUT THE QUERY WHICH MEANS CONNECTED TO THE SERVER BUT
+        ### BUT QUERY IS TAKING TO LONG TO COMPLETE
+        $dbh->disconnect;
+        print "Greenplum query timeout, gt $opt{timeout} secs\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    elsif ($@) {
+        ### DIDN'T TIMEOUT BUT EVAL FUNCTION CAUGHT AN ERROR SO WE NEED TO CRIT
+        ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
+        ### PLUGIN WANTS TO QUERY
+        alarm(0);
+        my ($error) = $@ =~ /^(.*+)\n/;
+        print "Greenplum Error: $error\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    else {
+        ### EVERYTHING WORKED OKAY YAY
+        my $end_time = time;
+        my $run_time = $end_time - $start_time;
+        my $not_valid_count = scalar(@result);
+        if ( $not_valid_count == 0 ) {
+          print "Greenplum Master Reports All Segments OK\n";
+          exit $ERRORS{'OK'};
+          }
+       else {
+          print "Greenplum Master Reports $not_valid_count Segments DOWN\n";
+          exit $ERRORS{'CRITICAL'};
+          }
+    }
+
+### THE ABOVE IF/ELSIF/ELSE SHOULD CATCH EVERYTHING SO WE SHOULDN'T
+### GET TO THIS EXIT
+    exit(3);
+
+}
+
+sub do_gp_4x_all_segments_valid {
+
+    my $SQL =
+qq~SELECT dbid, content, status, hostname, port FROM pg_catalog.gp_segment_configuration WHERE status <> 'u'~;
+
+    my $start_time = time;
+
+    eval {
+        ### SET THE LENGTH TO TIMEOUT THE QUERY
+        alarm( $opt{timeout} );
+
+        $dbh = DBI->connect(
+            "dbi:Pg:dbname=$opt{db};host=$opt{dbhost};port=5432",
+            $opt{username},
+            $opt{password},
+            { AutoCommit => 0, RaiseError => 1, PrintError => 0 }
+        ) || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+
+        $sth = $dbh->prepare($SQL)
+          || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+        $sth->execute
+          || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+        while ( my @row = $sth->fetchrow_array ) {
+            push @result, \@row;
+        }
+        $sth->finish;
+        $dbh->disconnect;
+        alarm(0);
+    };
+
+    if ( $@ && $@ =~ /timeout/ ) {
+        ### ALARM TIMED OUT THE QUERY WHICH MEANS CONNECTED TO THE SERVER BUT
+        ### BUT QUERY IS TAKING TO LONG TO COMPLETE
+        $dbh->disconnect;
+        print "Greenplum query timeout, gt $opt{timeout} secs\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    elsif ($@) {
+        ### DIDN'T TIMEOUT BUT EVAL FUNCTION CAUGHT AN ERROR SO WE NEED TO CRIT
+        ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
+        ### PLUGIN WANTS TO QUERY
+        alarm(0);
+        my ($error) = $@ =~ /^(.*+)\n/;
+        print "Greenplum Error: $error\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    else {
+        ### EVERYTHING WORKED OKAY YAY
+        my $end_time = time;
+        my $run_time = $end_time - $start_time;
+        my $not_valid_count = scalar(@result);
+        if ( $not_valid_count == 0 ) {
+          print "Greenplum Master Reports All Segments OK\n";
+          exit $ERRORS{'OK'};
+          }
+       else {
+          print "Greenplum Master Reports $not_valid_count Segments DOWN\n";
+          exit $ERRORS{'CRITICAL'};
+          }
+    }
+
+### THE ABOVE IF/ELSIF/ELSE SHOULD CATCH EVERYTHING SO WE SHOULDN'T
+### GET TO THIS EXIT
+    exit(3);
+
+}
+
+sub do_gp_connect_test {
+
+    my $start_time = time;
+
+    eval {
+        ### SET THE LENGTH TO TIMEOUT THE QUERY
+        alarm( $opt{timeout} );
+
+        $dbh = DBI->connect(
+            "dbi:Pg:dbname=$opt{db};host=$opt{dbhost};port=5432",
+            $opt{username},
+            $opt{password},
+            { AutoCommit => 0, RaiseError => 1, PrintError => 0 }
+        ) || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+
+        $dbh->disconnect;
+        alarm(0);
+    };
+
+    if ( $@ && $@ =~ /timeout/ ) {
+        ### ALARM TIMED OUT THE QUERY WHICH MEANS CONNECTED TO THE SERVER BUT
+        ### BUT QUERY IS TAKING TO LONG TO COMPLETE
+        $dbh->disconnect;
+        print "Greenplum Connect Timeout, gt $opt{timeout} secs\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    elsif ($@) {
+        ### DIDN'T TIMEOUT BUT EVAL FUNCTION CAUGHT AN ERROR SO WE NEED TO CRIT
+        ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
+        ### PLUGIN WANTS TO QUERY
+        alarm(0);
+        my ($error) = $@ =~ /^(.*+)\n/;
+        print "Greenplum Error: $error\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    else {
+        ### EVERYTHING WORKED OKAY YAY
+        my $end_time = time;
+        my $run_time = $end_time - $start_time;
+        print "Greenplum Connect OK - $run_time seconds\n";
+        exit $ERRORS{'OK'};
+    }
+
+### THE ABOVE IF/ELSIF/ELSE SHOULD CATCH EVERYTHING SO WE SHOULDN'T
+### GET TO THIS EXIT
+    exit(3);
+
+}
