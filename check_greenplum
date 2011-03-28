@@ -10,10 +10,11 @@
 #
 # CHANGELOG:
 #
+# 1.0.2 2011-03-28 Adding Check for long running queries
 # 1.0.1 2011-02-25 Initial Release
 #
 #
-# 2011-02-25 SHK
+# 2011-03-28 SHK
 ############
 
 use strict;
@@ -28,7 +29,7 @@ use vars qw( $dbh $sth $sql @result %opt
 );
 
 $NAME    = 'check_greenplum';
-$VERSION = '1.0.1';
+$VERSION = '1.0.2';
 $AUTHOR  = 'Scott Kahler';
 $CONTACT = 'scott.kahler@gmail.com';
 
@@ -60,40 +61,47 @@ GENERAL OPTIONS:
 
                  
 TESTS:
+  --do-connect-test
       Check to see if Greenplum accepts a connection
       This is the default check
 
-  --do-connect-test
 
-
-
+  --do-select-test
       Check to see if getting data from a table works
       The check executes a SELECT count by segment_id query
       for the specified table. This could also be used to
       setup SLA checks for getting data from the db
  
-  --do-select-test
   --select-schema         Schema for Select check         (mandatory)
   --select-table          Table for Select check          (mandatory)
 
 
+  --do-create-test
        Check to see if table creation works
        The check creates a temp table with and id(int) and
-       vlas(char) columns and set the distributed by to id.
+       vals(char) columns and set the distributed by to id.
        This helps to monitor if the catalog queries and table 
        creation are happening in a reasonable amount of table 
                   
-  --do-create-test
   --create-table          Table for Create check          (mandatory)
 
 
+  --do-3x-all-segments-valid 
+  --do-4x-all-segments-valid
         Check to see if GP considers any segments offline
         Query the gp_configuration (3.x) and gp_segment_configuration (4.x)
         tables to see if any segments are marked down at the master level.
         Currently this will crit if any show down.
 
-  --do-3x-all-segments-valid 
-  --do-4x-all-segments-valid
+
+  --do-check-long-running-queries
+        Check to see if GP has any long running queries
+        Query pg_catalog.pg_stat_activity
+        to see if any queries have been running for more than "long-running-warn" or
+        "long-running-crit" minutes and execute the appropriate action.
+
+  --long-running-warn     Minutes                         (mandatory)
+  --long-running-crit     Minutes                         (mandatory)
 
 END_HELP
 
@@ -110,42 +118,48 @@ END_LICENSE
 
 ### OPTIONS WITH DEFAULT VALUES
 %opt = (
-    'debug'                    => 0,
-    'help'                     => 0,
-    'version'                  => 0,
-    'do_select_test'           => 0,
-    'do_create_test'           => 0,
-    'do_connect_test'          => 0,
-    'do_3x_all_segments_valid' => 0,
-    'do_4x_all_segments_valid' => 0,
-    'db'                       => undef,
-    'dbhost'                   => undef,
-    'timeout'                  => 300,
-    'username'                 => undef,
-    'password'                 => undef,
-    'select_schema'            => undef,
-    'select_table'             => undef,
-    'create_table'             => undef,
+    'debug'                            => 0,
+    'help'                             => 0,
+    'version'                          => 0,
+    'do_select_test'                   => 0,
+    'do_create_test'                   => 0,
+    'do_connect_test'                  => 0,
+    'do_3x_all_segments_valid'         => 0,
+    'do_4x_all_segments_valid'         => 0,
+    'do_check_long_running_queries'    => 0,
+    'db'                               => undef,
+    'dbhost'                           => undef,
+    'timeout'                          => 300,
+    'username'                         => undef,
+    'password'                         => undef,
+    'select_schema'                    => undef,
+    'select_table'                     => undef,
+    'create_table'                     => undef,
+    'long_running_warn'                => undef,
+    'long_running_crit'                => undef,
 );
 
 ### GET OPTIONS
 GetOptions(
-    'd|debug'                     => \$opt{debug},
-    'h|help'                      => \$opt{help},
-    'V|version'                   => \$opt{version},
-    'do-select-test'              => \$opt{do_select_test},
-    'do-create-test'              => \$opt{do_create_test},
-    'do-connect-test'             => \$opt{do_connect_test},
-    'do-3x-all-segments-valid'    => \$opt{do_3x_all_segments_valid},
-    'do-4x-all-segments-valid'    => \$opt{do_4x_all_segments_valid},
-    't|timeout=i'                 => \$opt{timeout},
-    'U|username=s'                => \$opt{username},
-    'P|password=s'                => \$opt{password},
-    'H|dbhost=s'                  => \$opt{dbhost},
-    'D|db=s'                      => \$opt{db},
-    'select-schema=s'             => \$opt{select_schema},
-    'select-table=s'              => \$opt{select_table},
-    'create-table=s'              => \$opt{create_table},
+    'd|debug'                             => \$opt{debug},
+    'h|help'                              => \$opt{help},
+    'V|version'                           => \$opt{version},
+    'do-select-test'                      => \$opt{do_select_test},
+    'do-create-test'                      => \$opt{do_create_test},
+    'do-connect-test'                     => \$opt{do_connect_test},
+    'do-3x-all-segments-valid'            => \$opt{do_3x_all_segments_valid},
+    'do-4x-all-segments-valid'            => \$opt{do_4x_all_segments_valid},
+    'do-check-long-running-queries'       => \$opt{do_check_long_running_queries},
+    't|timeout=i'                         => \$opt{timeout},
+    'U|username=s'                        => \$opt{username},
+    'P|password=s'                        => \$opt{password},
+    'H|dbhost=s'                          => \$opt{dbhost},
+    'D|db=s'                              => \$opt{db},
+    'select-schema=s'                     => \$opt{select_schema},
+    'select-table=s'                      => \$opt{select_table},
+    'create-table=s'                      => \$opt{create_table},
+    'long-running-warn=i'                 => \$opt{long_running_warn},
+    'long-running-crit=i'                 => \$opt{long_running_crit},
 ) or do { print $USAGE; exit $ERRORS{'UNKNOWN'} };
 
 # IF HELP
@@ -202,6 +216,17 @@ elsif ( $opt{do_connect_test} ) {
         && $opt{username}
         && $opt{password} );
     do_gp_connect_test();
+}
+elsif ( $opt{do_check_long_running_queries} ) {
+    do_help()
+      unless ( $opt{db}
+        && $opt{dbhost}
+        && $opt{username}
+        && $opt{password} 
+        && $opt{long_running_warn} 
+        && $opt{long_running_crit} 
+        );
+    do_gp_check_long_running_queries();
 }
 else {
     ### BY DEFAULT DO CONNECT TEST IF DB VARIABLES ARE PASSED
@@ -519,6 +544,74 @@ sub do_gp_connect_test {
         my $run_time = $end_time - $start_time;
         print "Greenplum Connect OK - $run_time seconds\n";
         exit $ERRORS{'OK'};
+    }
+
+### THE ABOVE IF/ELSIF/ELSE SHOULD CATCH EVERYTHING SO WE SHOULDN'T
+### GET TO THIS EXIT
+    exit(3);
+
+}
+
+sub do_gp_check_long_running_queries {
+
+    my $longest_query = 0;
+    my $SQL = qq~
+SELECT EXTRACT ( EPOCH FROM ( current_timestamp - MIN( COALESCE( query_start, backend_start ) ) ) )::int/60 
+FROM pg_stat_activity 
+WHERE current_query <> '<IDLE>'~;
+
+
+    eval {
+        ### SET THE LENGTH TO TIMEOUT THE QUERY
+        alarm( $opt{timeout} );
+
+        $dbh = DBI->connect(
+            "dbi:Pg:dbname=$opt{db};host=$opt{dbhost};port=5432",
+            $opt{username},
+            $opt{password},
+            { AutoCommit => 0, RaiseError => 1, PrintError => 0 }
+        ) || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+
+        $sth = $dbh->prepare($SQL)
+          || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+        $sth->execute
+          || ( print "Greenplum Error: $!\n", exit $ERRORS{'CRITICAL'} );
+        ($longest_query) = $sth->fetchrow;
+        $sth->finish;
+        $dbh->disconnect;
+        alarm(0);
+    };
+
+    if ( $@ && $@ =~ /timeout/ ) {
+        ### ALARM TIMED OUT THE QUERY WHICH MEANS CONNECTED TO THE SERVER BUT
+        ### BUT QUERY IS TAKING TO LONG TO COMPLETE
+        $dbh->disconnect;
+        print "Greenplum query timeout, gt $opt{timeout} secs\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    elsif ($@) {
+        ### DIDN'T TIMEOUT BUT EVAL FUNCTION CAUGHT AN ERROR SO WE NEED TO CRIT
+        ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
+        ### PLUGIN WANTS TO QUERY
+        alarm(0);
+        my ($error) = $@ =~ /^(.*+)\n/;
+        print "Greenplum Error: $error\n";
+        exit $ERRORS{'CRITICAL'};
+    }
+    else {
+        ### EVERYTHING WORKED OKAY YAY
+        if ( $longest_query > $opt{long_running_crit} ) {
+          print "Greenplum Longest Query Running $longest_query minutes\n";
+          exit $ERRORS{'CRITICAL'};
+          }
+        elsif ( $longest_query > $opt{long_running_warn} ) {
+          print "Greenplum Longest Query Running $longest_query minutes\n";
+          exit $ERRORS{'WARNING'};
+          }
+       else {
+          print "Greenplum Longest Query Running $longest_query minutes\n";
+          exit $ERRORS{'OK'};
+          }
     }
 
 ### THE ABOVE IF/ELSIF/ELSE SHOULD CATCH EVERYTHING SO WE SHOULDN'T
