@@ -10,11 +10,12 @@
 #
 # CHANGELOG:
 #
+# 1.0.3 2012-05-22 Fixing silly regex code - thanks JB Segal
 # 1.0.2 2011-03-28 Adding Check for long running queries
 # 1.0.1 2011-02-25 Initial Release
 #
 #
-# 2011-03-28 SHK
+# 2012-05-22 SHK
 ############
 
 use strict;
@@ -29,7 +30,7 @@ use vars qw( $dbh $sth $sql @result %opt
 );
 
 $NAME    = 'check_greenplum';
-$VERSION = '1.0.2';
+$VERSION = '1.0.3';
 $AUTHOR  = 'Scott Kahler';
 $CONTACT = 'scott.kahler@gmail.com';
 
@@ -296,7 +297,7 @@ qq~SELECT COUNT(1), gp_segment_id FROM $opt{select_schema}.$opt{select_table} GR
         ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
         ### PLUGIN WANTS TO QUERY
         alarm(0);
-        my ($error) = $@ =~ /^(.*+)\n/;
+        my ($error) = $@ =~ /^(.+)\n/;
         print "Greenplum Error: $error\n";
         exit $ERRORS{'CRITICAL'};
     }
@@ -349,7 +350,7 @@ qq~CREATE TEMP TABLE $opt{create_table} ( id int, vals char(16) ) DISTRIBUTED by
         ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
         ### PLUGIN WANTS TO QUERY
         alarm(0);
-        my ($error) = $@ =~ /^(.*+)\n/;
+        my ($error) = $@ =~ /^(.+)\n/;
         print "Greenplum Error: $error\n";
         exit $ERRORS{'CRITICAL'};
     }
@@ -411,7 +412,7 @@ qq~SELECT hostname, port, datadir FROM pg_catalog.gp_configuration WHERE valid =
         ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
         ### PLUGIN WANTS TO QUERY
         alarm(0);
-        my ($error) = $@ =~ /^(.*+)\n/;
+        my ($error) = $@ =~ /^(.+)\n/;
         print "Greenplum Error: $error\n";
         exit $ERRORS{'CRITICAL'};
     }
@@ -478,7 +479,7 @@ qq~SELECT dbid, content, status, hostname, port FROM pg_catalog.gp_segment_confi
         ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
         ### PLUGIN WANTS TO QUERY
         alarm(0);
-        my ($error) = $@ =~ /^(.*+)\n/;
+        my ($error) = $@ =~ /^(.+)\n/;
         print "Greenplum Error: $error\n";
         exit $ERRORS{'CRITICAL'};
     }
@@ -534,7 +535,7 @@ sub do_gp_connect_test {
         ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
         ### PLUGIN WANTS TO QUERY
         alarm(0);
-        my ($error) = $@ =~ /^(.*+)\n/;
+        my ($error) = $@ =~ /^(.+)\n/;
         print "Greenplum Error: $error\n";
         exit $ERRORS{'CRITICAL'};
     }
@@ -594,7 +595,7 @@ WHERE current_query <> '<IDLE>'~;
         ### ON THE ERROR. THIS COULD BE CONNECTION ISSUES OR MISSING THE TABLE THE
         ### PLUGIN WANTS TO QUERY
         alarm(0);
-        my ($error) = $@ =~ /^(.*+)\n/;
+        my ($error) = $@ =~ /^(.+)\n/;
         print "Greenplum Error: $error\n";
         exit $ERRORS{'CRITICAL'};
     }
